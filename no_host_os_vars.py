@@ -1,19 +1,19 @@
 """Custom ansible-lint rule: no per-host os_* keys in inventory files.
 
-Repo standard (see CLAUDE.md "Inventory Structure"): a host entry must not
-declare `os_family`, `os_distribution`, `os_version` or `os_edition`. For any
-host that can run the `setup` module these are hand-maintained duplicates of
-gathered facts — they drift silently and nothing reads them. Code that branches
-on OS reads `ansible_facts['os_family']`; provisioning code that runs before the
-guest exists (roles/cloud_init) branches on inventory GROUP membership instead.
+Convention: a host entry must not declare `os_family`, `os_distribution`,
+`os_version` or `os_edition`. For any host that can run the `setup` module these
+are hand-maintained duplicates of gathered facts — they drift silently and
+nothing reads them. Code that branches on OS reads `ansible_facts['os_family']`;
+provisioning code that runs before the guest exists (a cloud-init template, say)
+branches on inventory GROUP membership instead.
 
 Scope is deliberately narrow: only keys set directly on a host entry underneath
 a `hosts:` mapping in an inventory file (kind == "inventory"). It does NOT flag
 the same names nested inside a structured var, because those are a different
 namespace and legitimate — e.g. `hyperv_guest_config.base_images.<name>.
 os_version`, which drives AVMA product-key resolution. Nor does it look at
-group_vars/host_vars files (kind == "vars"); no host_vars file sets these today,
-and widening it there is a separate call.
+group_vars/host_vars files (kind == "vars") — widening it there is a separate
+call.
 
 Escape hatch for a genuinely fact-less device (a network switch, a UPS card):
 put the OS in a comment, or `# noqa: no-host-os-vars` if it must be a var.

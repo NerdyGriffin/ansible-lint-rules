@@ -1,10 +1,9 @@
 """Custom ansible-lint rule: become keys come immediately after name.
 
-Repo standard (deliberately imposed — see CLAUDE.md "Task key order"): within a
-task, `become` and its `become_*` companions sort directly after `name`, ahead
-of the module and every other key. This is a *chosen* convention, not one the
-codebase already followed uniformly (it was a ~24% minority when adopted), so it
-is enforced by tooling rather than left to habit.
+Convention: within a task, `become` and its `become_*` companions sort directly
+after `name`, ahead of the module and every other key. This is a *chosen*
+convention, not one a codebase follows by default (it was a ~24% minority in the
+repo that adopted it), so it is enforced by tooling rather than left to habit.
 
 Autofix-capable (TransformMixin): `ansible-lint --fix` hoists the become group.
 Modeled on ansiblelint.rules.key_order.KeyOrderRule.
