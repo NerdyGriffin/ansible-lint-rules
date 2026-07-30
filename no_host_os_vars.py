@@ -43,9 +43,13 @@ BANNED_KEYS: frozenset[str] = frozenset(
 def find_host_os_vars(data: Any) -> list[tuple[str, str, int]]:
     """Return (hostname, key, line) for every banned key on a host entry.
 
-    Walks an inventory tree looking for `hosts:` mappings at any depth (they
-    appear under `all:` and under every group in `children:`). `line` is 1-based
-    and comes from ruamel round-trip position data when available, else 0.
+    Follows the inventory group structure *strictly* — a group node's `hosts:`
+    and `children:` only. It deliberately does NOT recurse into arbitrary
+    mappings: a `vars:` value is free-form user data that may itself contain a
+    key called `hosts`, and treating that as an inventory host entry would be a
+    false positive.
+
+    `line` is 1-based, from ruamel round-trip position data when available.
     """
     found: list[tuple[str, str, int]] = []
 
@@ -56,23 +60,31 @@ def find_host_os_vars(data: Any) -> list[tuple[str, str, int]]:
         pos = lc.data.get(key)
         return pos[0] + 1 if pos else 0
 
-    def walk(node: Any) -> None:
-        if not isinstance(node, dict):
+    def walk_group(group: Any) -> None:
+        """Visit one group node: its `hosts:`, then its `children:` groups."""
+        if not isinstance(group, dict):
             return
-        for key, value in node.items():
-            if key == "hosts" and isinstance(value, dict):
-                for hostname, host_vars in value.items():
-                    # `hosts:` entries are commonly null (`hostname:` alone).
-                    if not isinstance(host_vars, dict):
-                        continue
-                    for banned in BANNED_KEYS.intersection(host_vars):
-                        found.append(
-                            (str(hostname), banned, line_of(host_vars, banned)),
-                        )
-                continue
-            walk(value)
 
-    walk(data)
+        hosts = group.get("hosts")
+        if isinstance(hosts, dict):
+            for hostname, host_vars in hosts.items():
+                # `hosts:` entries are commonly null (`hostname:` alone).
+                if not isinstance(host_vars, dict):
+                    continue
+                for banned in sorted(BANNED_KEYS.intersection(host_vars)):
+                    found.append(
+                        (str(hostname), banned, line_of(host_vars, banned)),
+                    )
+
+        children = group.get("children")
+        if isinstance(children, dict):
+            for child in children.values():
+                walk_group(child)
+
+    # Top level of an inventory file is a mapping of group name -> group node.
+    if isinstance(data, dict):
+        for group in data.values():
+            walk_group(group)
     return found
 
 
@@ -90,11 +102,15 @@ class NoHostOsVarsRule(AnsibleLintRule):
     def matchyaml(self, file: Lintable) -> list[MatchError]:
         if str(file.kind) != "inventory":
             return []
-        try:
-            from ruamel.yaml import YAML
+        from ruamel.yaml import YAML
+        from ruamel.yaml.error import YAMLError
 
+        try:
             data = YAML(typ="rt").load(file.content)
-        except Exception:  # pragma: no cover - unparseable YAML is another rule's job
+        except YAMLError:  # pragma: no cover - malformed YAML is load-failure's job
+            # Only swallow parser errors; anything else is a real bug in this
+            # rule or its dependencies and should surface rather than report a
+            # false clean.
             return []
 
         # ansible-lint applies `# noqa` automatically to task- and play-level
@@ -177,6 +193,22 @@ if "pytest" in sys.modules:  # pragma: no cover
         )
         assert find_host_os_vars(data) == []
 
+    def test_ignores_hosts_key_inside_a_free_form_var() -> None:
+        # Regression: `vars:` is user data and may contain its own `hosts` key.
+        # Traversal follows group structure only, so this must not be read as an
+        # inventory host entry.
+        data = _load(
+            "all:\n"
+            "  vars:\n"
+            "    some_config:\n"
+            "      hosts:\n"
+            "        decoy:\n"
+            "          os_version: '9'\n"
+            "  hosts:\n"
+            "    web-1:\n",
+        )
+        assert find_host_os_vars(data) == []
+
     def test_tolerates_bare_host_entries() -> None:
         data = _load("all:\n  hosts:\n    web-1:\n    web-2:\n")
         assert find_host_os_vars(data) == []
@@ -185,3 +217,60 @@ if "pytest" in sys.modules:  # pragma: no cover
     def test_every_banned_key_is_caught(key: str) -> None:
         data = _load(f"all:\n  hosts:\n    h:\n      {key}: x\n")
         assert [f for _, f, _ in find_host_os_vars(data)] == [key]
+
+    # --- matchyaml(): file-kind scoping and noqa handling -------------------
+
+    def _lint(tmp_path: Any, text: str, *, name: str = "hosts.yml") -> list[str]:
+        """Run the rule over `text` written into an inventory/ dir."""
+        from ansiblelint.file_utils import Lintable
+
+        inv = tmp_path / "inventory"
+        inv.mkdir(exist_ok=True)
+        path = inv / name
+        path.write_text(text)
+
+        return [m.message for m in NoHostOsVarsRule().matchyaml(Lintable(str(path)))]
+
+    def test_matchyaml_reports_host_entry(tmp_path: Any) -> None:
+        messages = _lint(
+            tmp_path,
+            "all:\n  hosts:\n    web-1:\n      os_family: RedHat\n",
+        )
+        assert len(messages) == 1
+        assert "web-1" in messages[0]
+        assert "os_family" in messages[0]
+
+    def test_matchyaml_honors_noqa(tmp_path: Any) -> None:
+        assert (
+            _lint(
+                tmp_path,
+                "all:\n"
+                "  hosts:\n"
+                "    switch-1:\n"
+                "      os_distribution: EOS # noqa: no-host-os-vars\n",
+            )
+            == []
+        )
+
+    def test_matchyaml_noqa_is_per_line(tmp_path: Any) -> None:
+        # The comment must only excuse the line it sits on.
+        messages = _lint(
+            tmp_path,
+            "all:\n"
+            "  hosts:\n"
+            "    switch-1:\n"
+            "      os_distribution: EOS # noqa: no-host-os-vars\n"
+            "      os_version: '4.32'\n",
+        )
+        assert len(messages) == 1
+        assert "os_version" in messages[0]
+
+    def test_matchyaml_skips_non_inventory_files(tmp_path: Any) -> None:
+        # A vars file is out of scope even with a host-shaped tree inside it.
+        from ansiblelint.file_utils import Lintable
+
+        path = tmp_path / "main.yml"
+        path.write_text("all:\n  hosts:\n    web-1:\n      os_family: RedHat\n")
+        lintable = Lintable(str(path))
+        assert str(lintable.kind) != "inventory"
+        assert NoHostOsVarsRule().matchyaml(lintable) == []
