@@ -12,7 +12,8 @@ copy.
 | `no-host-os-vars` | no | A host entry in an inventory file must not declare `os_family`, `os_distribution`, `os_version` or `os_edition`. |
 
 Both are opinionated conventions, not bug detectors. Adopt the ones you want;
-`skip_list` or `warn_list` turns off the rest.
+`skip_list` disables the rest, or `warn_list` keeps them running but makes their
+findings non-fatal.
 
 ### `become-first`
 
