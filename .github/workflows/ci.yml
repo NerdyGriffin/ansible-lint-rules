@@ -31,9 +31,11 @@ jobs:
         run: pytest
 
       # A rule that fails to import is silently absent rather than an error, so
-      # prove ansible-lint actually loads both of them.
+      # prove ansible-lint actually loads every one of them.
       - name: Verify the rules load.
         run: |
           ansible-lint -R -r . -L --nocolor | tee /tmp/rules.txt
           grep -q 'become-first' /tmp/rules.txt
           grep -q 'no-host-os-vars' /tmp/rules.txt
+          grep -q 'no-fake-ansible-vars' /tmp/rules.txt
+          grep -q 'inventory-var-placement' /tmp/rules.txt
