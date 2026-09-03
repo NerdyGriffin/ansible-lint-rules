@@ -27,6 +27,20 @@ Both subtags are decided by membership in `BUILTIN_VARS`:
 The second direction is what stops the inventory file becoming a dumping ground
 once the first direction pushes traffic toward it.
 
+DIVISION OF LABOUR WITH THE OTHER RULES
+---------------------------------------
+`no-fake-ansible-vars` owns every `ansible_`-prefixed name in a vars file, so the
+first direction here skips them and reports only built-ins with NO prefix —
+`become`, `proxmox_api_host`, `wsl_user` and friends, which a prefix rule cannot
+see.
+
+`no-host-os-vars` owns the `os_*` metadata keys, so the second direction skips
+those. That is not merely to avoid a duplicate: this rule's advice is "move it to
+group_vars", which for `os_family` is the WRONG fix — the remedy there is to
+delete the var and read the gathered fact.
+
+Between them, no line draws findings from two of these rules.
+
 Note that `BUILTIN_VARS` deliberately includes names with no `ansible_` prefix —
 `become`, `proxmox_api_host`, `wsl_user` are real connection-plugin vars. A
 prefix test would exile them from the inventory file, which is exactly where
@@ -50,9 +64,11 @@ from ansiblelint.skip_utils import get_rule_skips_from_line
 
 try:  # pragma: no cover - import shape differs between rulesdir and package use
     from ansible_builtin_vars import BUILTIN_VARS
+    from no_host_os_vars import BANNED_KEYS as OS_METADATA_KEYS
 except ImportError:  # pragma: no cover
     sys.path.insert(0, str(Path(__file__).parent))
     from ansible_builtin_vars import BUILTIN_VARS
+    from no_host_os_vars import BANNED_KEYS as OS_METADATA_KEYS
 
 if TYPE_CHECKING:
     from ansiblelint.file_utils import Lintable
@@ -90,6 +106,12 @@ def find_non_builtins_in_inventory(data: Any) -> list[tuple[str, str, int]]:
             name = str(key)
             if name in BUILTIN_VARS:
                 continue
+            # `no-host-os-vars` owns os_family/os_distribution/os_version/
+            # os_edition. Reporting them here too would not just duplicate that
+            # rule — it would CONTRADICT it, since "move this to group_vars" is
+            # the wrong fix for a var whose actual remedy is deletion.
+            if name in OS_METADATA_KEYS:
+                continue
             # A structured value is inventory data (vm_spec, network, ...) that
             # a role consumes wholesale; the convention is about scalar
             # connection settings, so leave composites alone.
@@ -119,15 +141,23 @@ def find_non_builtins_in_inventory(data: Any) -> list[tuple[str, str, int]]:
 
 
 def find_builtins_in_vars_file(data: Any) -> list[tuple[str, int]]:
-    """Return (varname, line) for built-ins defined in a group/host vars file.
+    """Return (varname, line) for UNPREFIXED built-ins in a group/host vars file.
 
     Top-level keys only — a nested `ansible_user` is a field inside somebody
     else's structure, not a variable Ansible resolves under that name.
+
+    `ansible_`-prefixed names are deliberately skipped: `no-fake-ansible-vars`
+    already reports every one of them in a vars file, so reporting them here too
+    would put two findings on one line. What is left to catch is the built-in
+    that carries NO prefix — `become`, `proxmox_api_host`, `wsl_user` — which a
+    prefix rule cannot see at all.
     """
     if not isinstance(data, dict):
         return []
     return [
-        (str(key), line_of(data, key)) for key in data if str(key) in BUILTIN_VARS
+        (str(key), line_of(data, key))
+        for key in data
+        if str(key) in BUILTIN_VARS and not str(key).startswith("ansible_")
     ]
 
 
@@ -220,12 +250,14 @@ if "pytest" in sys.modules:  # pragma: no cover
 
     # --- direction 1: built-ins in a vars file -----------------------------
 
-    def test_flags_builtin_in_vars_file() -> None:
+    def test_defers_prefixed_builtin_to_the_other_rule() -> None:
+        # no-fake-ansible-vars owns ansible_* in a vars file; no double-report.
         data = _load("---\nansible_user: root\nmy_setting: 1\n")
-        assert find_builtins_in_vars_file(data) == [("ansible_user", 2)]
+        assert find_builtins_in_vars_file(data) == []
 
     def test_flags_unprefixed_builtin_in_vars_file() -> None:
-        # `become` is a real connection var despite carrying no prefix.
+        # `become` is a real connection var despite carrying no prefix, and is
+        # invisible to a prefix rule — this is what this direction is for.
         assert find_builtins_in_vars_file(_load("---\nbecome: true\n")) == [
             ("become", 2),
         ]
@@ -288,6 +320,12 @@ if "pytest" in sys.modules:  # pragma: no cover
     def test_tolerates_bare_host_entries() -> None:
         assert find_non_builtins_in_inventory(_load("all:\n  hosts:\n    h:\n")) == []
 
+    def test_defers_os_metadata_to_no_host_os_vars() -> None:
+        # Reporting os_family here would contradict that rule: the fix is to
+        # delete it and read the gathered fact, not to relocate it.
+        data = _load("all:\n  hosts:\n    h:\n      os_family: RedHat\n")
+        assert find_non_builtins_in_inventory(data) == []
+
     # --- inventory_vars_dir() ----------------------------------------------
 
     def test_vars_dir_detected() -> None:
@@ -312,19 +350,28 @@ if "pytest" in sys.modules:  # pragma: no cover
             for m in InventoryVarPlacementRule().matchyaml(Lintable(str(path)))
         ]
 
-    def test_matchyaml_group_vars_builtin(tmp_path: Any) -> None:
+    def test_matchyaml_group_vars_unprefixed_builtin(tmp_path: Any) -> None:
         messages = _lint(
             tmp_path,
             "inventory/group_vars/proxmox/main.yml",
-            "---\nansible_user: root\n",
+            "---\nbecome: true\n",
         )
         assert len(messages) == 1
-        assert "ansible_user" in messages[0]
+        assert "become" in messages[0]
+
+    def test_matchyaml_group_vars_defers_prefixed(tmp_path: Any) -> None:
+        assert (
+            _lint(
+                tmp_path,
+                "inventory/group_vars/proxmox/main.yml",
+                "---\nansible_user: root\n",
+            )
+            == []
+        )
 
     def test_matchyaml_skips_role_vars(tmp_path: Any) -> None:
         assert (
-            _lint(tmp_path, "roles/myrole/vars/main.yml", "---\nansible_user: root\n")
-            == []
+            _lint(tmp_path, "roles/myrole/vars/main.yml", "---\nbecome: true\n") == []
         )
 
     def test_matchyaml_honors_noqa(tmp_path: Any) -> None:
@@ -332,7 +379,7 @@ if "pytest" in sys.modules:  # pragma: no cover
             _lint(
                 tmp_path,
                 "inventory/group_vars/proxmox/main.yml",
-                "---\nansible_user: root # noqa: inventory-var-placement\n",
+                "---\nbecome: true # noqa: inventory-var-placement\n",
             )
             == []
         )
