@@ -145,8 +145,13 @@ that adds a variable fails.
 
 `role_prefixes.py` answers "does a role by this name actually exist?" from
 Ansible's own **`roles_path`** (`ansible.constants.DEFAULT_ROLES_PATH`, which
-honours `ansible.cfg`), plus any playbook-adjacent `roles/` directories, which
-`roles_path` never lists because Ansible resolves those relative to the playbook.
+honours `ansible.cfg`), plus the project's local `roles/` directories.
+
+Both halves are needed. `roles_path` alone is not enough: its default is
+`~/.ansible/roles`, `/usr/share/ansible/roles`, `/etc/ansible/roles`, and the
+project's **own `roles/` is absent** unless an `ansible.cfg` explicitly appends
+it — Ansible normally reaches those by playbook adjacency. So `<root>/roles` is
+scanned directly, along with nested ones like `playbooks/<area>/roles/`.
 
 Asking the environment beats inferring the role from the file's path, which was
 wrong twice over:

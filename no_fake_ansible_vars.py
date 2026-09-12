@@ -239,6 +239,36 @@ if "pytest" in sys.modules:  # pragma: no cover
             == []
         )
 
+    def test_matchyaml_exempts_a_role_in_project_root_roles(tmp_path: Any) -> None:
+        """Regression: default roles_path excludes <root>/roles.
+
+        A role's own correctly-prefixed variable was reported as a fake built-in
+        in any repo that had not appended ./roles to roles_path in ansible.cfg.
+        """
+        import os
+
+        from role_prefixes import known_role_names
+
+        (tmp_path / "roles" / "ansible_myapp" / "defaults").mkdir(parents=True)
+        (tmp_path / "roles" / "ansible_myapp" / "defaults" / "main.yml").write_text(
+            "---\nansible_myapp_port: 8080\n",
+        )
+        known_role_names.cache_clear()
+        cwd = os.getcwd()
+        try:
+            os.chdir(tmp_path)
+            assert (
+                _lint(
+                    tmp_path,
+                    "roles/ansible_myapp/defaults/main.yml",
+                    "---\nansible_myapp_port: 8080\n",
+                )
+                == []
+            )
+        finally:
+            os.chdir(cwd)
+            known_role_names.cache_clear()
+
     def test_matchyaml_skips_inventory_files(tmp_path: Any) -> None:
         # hosts.yml is out of scope: ansible_ names are correct there.
         from ansiblelint.file_utils import Lintable

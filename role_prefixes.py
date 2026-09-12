@@ -21,9 +21,15 @@ Reading Ansible's own `roles_path` answers both, because it asks what roles
 exist rather than guessing from where a file sits. `ansible.cfg` is the
 authority on that, and `ansible-lint` has already loaded it.
 
-Playbook-adjacent roles (`playbooks/<area>/roles/<name>/`) are NOT on
-`roles_path` — Ansible finds them relative to the playbook instead — so those
-directories are scanned as well.
+`roles_path` is NOT on its own sufficient, which is the subtle part. Its DEFAULT
+value is `~/.ansible/roles`, `/usr/share/ansible/roles`, `/etc/ansible/roles` —
+the project's own `roles/` is absent unless an `ansible.cfg` explicitly appends
+it. Ansible normally reaches a project's roles by playbook adjacency instead. So
+local `roles/` directories are scanned too: the one at the project root, and any
+nested under it (`playbooks/<area>/roles/<name>/`). Without the root one, a role
+called `ansible_myapp` goes undiscovered in any repo whose `ansible.cfg` does not
+append `./roles`, and its own correctly-prefixed `ansible_myapp_port` is then
+reported as a fake built-in.
 """
 
 from __future__ import annotations
@@ -69,14 +75,25 @@ def configured_roles_path() -> list[Path]:
     return [Path(entry) for entry in (c.DEFAULT_ROLES_PATH or [])]
 
 
-def playbook_adjacent_roles_dirs(root: Path, *, max_depth: int = 4) -> list[Path]:
-    """Return `roles/` directories under `root` that roles_path does not cover.
+def local_roles_dirs(root: Path, *, max_depth: int = 4) -> list[Path]:
+    """Return `roles/` directories inside the project that roles_path may miss.
 
-    Ansible resolves a role next to the playbook that uses it, so these are real
-    roles even though `roles_path` never mentions them. Depth-limited: this runs
-    at rule-construction time and must not walk a whole repository.
+    Two sources, and the first is easy to forget:
+
+    * `<root>/roles` itself. The default `roles_path` does NOT include it, so a
+      repo that has not appended `./roles` in `ansible.cfg` would otherwise have
+      every one of its own roles go undiscovered.
+    * `roles/` nested further down, e.g. `playbooks/<area>/roles/`. Ansible
+      resolves those relative to the playbook that uses them, so they are real
+      roles that `roles_path` never mentions.
+
+    Depth-limited: this runs once per project and must not walk a whole
+    repository.
     """
     found: list[Path] = []
+    project_roles = root / "roles"
+    if project_roles.is_dir():
+        found.append(project_roles)
     for depth in range(1, max_depth + 1):
         pattern = "/".join(["*"] * depth) + "/roles"
         try:
@@ -98,7 +115,7 @@ def known_role_names(project_root: str | None = None) -> frozenset[str]:
         names |= roles_in(directory)
     if project_root:
         root = Path(project_root)
-        for directory in playbook_adjacent_roles_dirs(root):
+        for directory in local_roles_dirs(root):
             names |= roles_in(directory)
     return frozenset(names)
 
@@ -144,12 +161,41 @@ if "pytest" in sys.modules:  # pragma: no cover
         (tmp_path / "playbooks" / "area" / "roles" / "local_role" / "tasks").mkdir(
             parents=True,
         )
-        dirs = playbook_adjacent_roles_dirs(tmp_path)
-        assert any(d.name == "roles" for d in dirs)
         names: set[str] = set()
-        for d in dirs:
+        for d in local_roles_dirs(tmp_path):
             names |= roles_in(d)
         assert "local_role" in names
+
+    def test_project_root_roles_dir_found(tmp_path: Path) -> None:
+        """Regression: the default roles_path does NOT include <root>/roles.
+
+        Missing it made a role's own correctly-prefixed variable look fake in
+        any repo that has not appended ./roles to roles_path in ansible.cfg.
+        """
+        (tmp_path / "roles" / "ansible_myapp" / "defaults").mkdir(parents=True)
+        assert tmp_path / "roles" in local_roles_dirs(tmp_path)
+        names: set[str] = set()
+        for d in local_roles_dirs(tmp_path):
+            names |= roles_in(d)
+        assert "ansible_myapp" in names
+
+    def test_root_and_nested_roles_dirs_both_found(tmp_path: Path) -> None:
+        (tmp_path / "roles" / "root_role" / "tasks").mkdir(parents=True)
+        (tmp_path / "playbooks" / "roles" / "nested_role" / "tasks").mkdir(
+            parents=True,
+        )
+        names: set[str] = set()
+        for d in local_roles_dirs(tmp_path):
+            names |= roles_in(d)
+        assert {"root_role", "nested_role"} <= names
+
+    def test_known_role_names_includes_project_root_roles(tmp_path: Path) -> None:
+        (tmp_path / "roles" / "ansible_myapp" / "defaults").mkdir(parents=True)
+        known_role_names.cache_clear()
+        assert "ansible_myapp" in known_role_names(str(tmp_path))
+
+    def test_local_roles_dirs_tolerates_missing_root_roles(tmp_path: Path) -> None:
+        assert local_roles_dirs(tmp_path) == []
 
     def test_configured_roles_path_is_a_list() -> None:
         # Environment-dependent, so assert only the contract.
