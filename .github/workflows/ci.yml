@@ -33,7 +33,11 @@ jobs:
       # A rule that fails to import is silently absent rather than an error, so
       # prove ansible-lint actually loads every one of them.
       - name: Verify the rules load.
+        # GitHub's default shell is `bash -e {0}` — pipefail is only added by an
+        # explicit `shell: bash` — so without this a crashing ansible-lint that
+        # still printed a partial list would be masked by tee's exit 0.
         run: |
+          set -o pipefail
           ansible-lint -R -r . -L --nocolor | tee /tmp/rules.txt
           grep -q 'become-first' /tmp/rules.txt
           grep -q 'no-host-os-vars' /tmp/rules.txt
