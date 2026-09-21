@@ -77,6 +77,13 @@ problems it is, so the message names the right fix — move it, or rename it.
 Inventory files are out of scope: `ansible_` names are correct in `hosts.yml`,
 and the opposite question there belongs to `inventory-var-placement`.
 
+An inline-encrypted value is **not** exempt. `ansible_become_password: !vault |`
+in `group_vars` is still a built-in in the wrong file — encryption changes what
+the value is, not where it belongs, and the inventory file is read by the same
+parser, so the `!vault` block moves as-is and decrypts there too. The message
+says so. (A whole-file-encrypted vault is not a mapping and never reaches the
+rule.)
+
 A role may prefix its own variables with its own name, so a role called
 `ansible_control_node` setting `ansible_control_node_stage` is exempt — that is
 the Galaxy flat-role-prefix convention. Which names count is read from Ansible's
@@ -121,10 +128,12 @@ It is deliberately **not** an `ansible_` prefix test, which is wrong in both
 directions: it flags homelab names that merely look built-in, and it misses real
 ones that carry no prefix at all (`become`, `proxmox_api_host`, `wsl_user`).
 
-The list is the union of three sources in ansible-core — `MAGIC_VARIABLE_MAPPING`,
-base config settings with a `vars:` entry (the only source of
-`ansible_python_interpreter`), and `vars:` entries on every connection/become/shell
-plugin option harvested through `ansible-doc`. `ansible-doc` is used rather than
+The list is the union of four sources — `MAGIC_VARIABLE_MAPPING`, base config
+settings with a `vars:` entry (the only source of `ansible_python_interpreter`),
+`vars:` entries on every connection/become/shell plugin option harvested through
+`ansible-doc`, and a short hand-maintained `INVENTORY_ONLY_VARS` set for names
+the inventory manager consumes while parsing (`ansible_group_priority`), which
+no runtime enumeration can see. `ansible-doc` is used rather than
 `config.get_configuration_definitions()` because that function cannot see plugins
 shipped in collections, and would omit e.g. `ansible_network_cli_ssh_type` from
 `ansible.netcommon.network_cli` — a real variable that would then be reported as
@@ -135,6 +144,10 @@ Regenerate with the collections you care about installed:
 ```bash
 python ansible_builtin_vars.py     # prints a replacement BUILTIN_VARS block
 ```
+
+A failing `ansible-doc` raises rather than harvesting nothing — an empty sweep
+would print a shrunken list that looks valid and that the superset test cannot
+distinguish from a correct one.
 
 Because the third source depends on installed collections, the committed list is
 a *superset* of any one environment. The test asserts that invariant rather than
