@@ -17,7 +17,7 @@ A prefix test is wrong in both directions:
 
 WHERE THE NAMES COME FROM
 -------------------------
-The union of three sources in ansible-core, none of which is sufficient alone:
+The union of four sources, none of which is sufficient alone:
 
 1. `ansible.constants.MAGIC_VARIABLE_MAPPING` — the connection/become mapping.
 2. Base configuration settings carrying a `vars:` entry. This is the ONLY
@@ -28,6 +28,12 @@ The union of three sources in ansible-core, none of which is sufficient alone:
    plugins shipped in COLLECTIONS — it silently omits, for example,
    `ansible_network_cli_ssh_type` from `ansible.netcommon.network_cli`, which
    would then be reported as a fake built-in.
+4. `INVENTORY_ONLY_VARS`, a short hand-maintained set. `ansible_group_priority`
+   is read by the inventory manager while it is *building* groups, so it works
+   only from the inventory source and nowhere else — and for the same reason it
+   is neither a magic-variable mapping nor a plugin option, so the three
+   automatic sources cannot see it. Without this set `inventory-var-placement`
+   would tell you to move it to `group_vars/`, where it does nothing.
 
 REGENERATING
 ------------
@@ -133,6 +139,7 @@ BUILTIN_VARS: frozenset[str] = frozenset(
     'ansible_gcloud_private_key_file',
     'ansible_gcloud_project',
     'ansible_gcloud_zone',
+    'ansible_group_priority',
     'ansible_grpc_connection_type',
     'ansible_grpc_ssl_target_name_override',
     'ansible_host',
@@ -441,12 +448,40 @@ BUILTIN_VARS: frozenset[str] = frozenset(
     },
 )
 
+# Source 4 (see WHERE THE NAMES COME FROM). Hand-maintained: nothing in
+# ansible-core enumerates these, because they are consumed during inventory
+# parsing rather than looked up as variables afterwards.
+INVENTORY_ONLY_VARS: frozenset[str] = frozenset({"ansible_group_priority"})
+
 # The prefixed subset. `no-fake-ansible-vars` compares against this one: a name
 # without the prefix cannot be mistaken for a built-in, so it is that rule's
 # business only when it IS one.
 BUILTIN_ANSIBLE_VARS: frozenset[str] = frozenset(
     name for name in BUILTIN_VARS if name.startswith("ansible_")
 )
+
+
+def _ansible_doc(*args: str) -> str:
+    """Run `ansible-doc` and return its stdout, or raise with its stderr.
+
+    Never swallow a failure here: an empty stdout would parse as `{}`, the
+    plugin sweep would silently contribute nothing, and `_print_regenerated()`
+    would print a *shrunken* list that looks perfectly valid. The superset test
+    cannot catch that either, since fewer harvested names never violate it.
+    """
+    result = subprocess.run(  # noqa: S603
+        ["ansible-doc", *args],  # noqa: S607
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        msg = (
+            f"ansible-doc {' '.join(args)} exited {result.returncode}: "
+            f"{result.stderr.strip() or '(no stderr)'}"
+        )
+        raise RuntimeError(msg)
+    return result.stdout
 
 
 def harvest_runtime() -> set[str]:
@@ -460,6 +495,7 @@ def harvest_runtime() -> set[str]:
     names: set[str] = {
         name for names_ in c.MAGIC_VARIABLE_MAPPING.values() for name in names_
     }
+    names |= INVENTORY_ONLY_VARS
 
     for definition in c.config.get_configuration_definitions().values():
         for entry in definition.get("vars") or []:
@@ -468,21 +504,11 @@ def harvest_runtime() -> set[str]:
                 names.add(name)
 
     for plugin_type in ("connection", "become", "shell"):
-        listing = subprocess.run(  # noqa: S603
-            ["ansible-doc", "-t", plugin_type, "--json", "--list"],  # noqa: S607
-            capture_output=True,
-            text=True,
-            check=False,
-        ).stdout
+        listing = _ansible_doc("-t", plugin_type, "--json", "--list")
         plugins = sorted(json.loads(listing or "{}"))
         if not plugins:
             continue
-        dumped = subprocess.run(  # noqa: S603
-            ["ansible-doc", "-t", plugin_type, "-j", *plugins],  # noqa: S607
-            capture_output=True,
-            text=True,
-            check=False,
-        ).stdout
+        dumped = _ansible_doc("-t", plugin_type, "-j", *plugins)
         for doc in json.loads(dumped or "{}").values():
             options = (doc.get("doc") or {}).get("options") or {}
             for option in options.values():
@@ -513,11 +539,30 @@ if "pytest" in sys.modules:  # pragma: no cover
         assert sorted(BUILTIN_VARS) == sorted(set(BUILTIN_VARS))
 
     def test_known_names_present() -> None:
-        # One from each of the three sources, chosen because each is the ONLY
+        # One from each of the four sources, chosen because each is the ONLY
         # source of that name — together they prove no source was dropped.
         assert "ansible_user" in BUILTIN_VARS  # MAGIC_VARIABLE_MAPPING
         assert "ansible_python_interpreter" in BUILTIN_VARS  # base config
         assert "ansible_psrp_auth" in BUILTIN_VARS  # plugin option
+        assert "ansible_group_priority" in BUILTIN_VARS  # inventory-only
+
+    def test_inventory_only_vars_reach_harvest() -> None:
+        # The frozen list is regenerated FROM harvest_runtime(), so source 4
+        # must flow through it or the next regeneration would drop it.
+        assert INVENTORY_ONLY_VARS <= harvest_runtime()
+
+    def test_ansible_doc_failure_raises(monkeypatch: object) -> None:
+        """A failed ansible-doc must not be read as 'no plugins'."""
+        import pytest
+
+        class Failed:
+            returncode = 1
+            stdout = ""
+            stderr = "ERROR! boom"
+
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: Failed())  # type: ignore[attr-defined]
+        with pytest.raises(RuntimeError, match="exited 1: ERROR! boom"):
+            _ansible_doc("-t", "connection", "--json", "--list")
 
     def test_unprefixed_builtins_are_kept() -> None:
         # A prefix test would lose these; the placement rule needs them.
