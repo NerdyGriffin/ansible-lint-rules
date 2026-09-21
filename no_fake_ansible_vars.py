@@ -36,6 +36,17 @@ a name is exempt when it starts with the name of a role that ACTUALLY EXISTS,
 discovered from Ansible's live `roles_path` rather than guessed from the file's
 own path. See `role_prefixes.py` for why the path heuristic was wrong.
 
+VAULTED VALUES ARE NOT EXEMPT
+-----------------------------
+`ansible_become_password: !vault |` in a vars file is still a built-in in the
+wrong file. Encryption changes what the value IS, not where it belongs: the
+inventory YAML plugin uses the same loader, so an inline `!vault` block moves
+into the inventory file as-is and decrypts there too. Exempting it would open
+exactly the hole the rule closes — any connection secret could sit in
+`group_vars` unseen. The message says so, so the move is obvious to make.
+(A whole-file-encrypted vault is not a mapping at all and never reaches this
+rule; nothing to exempt.)
+
 Not autofix-capable: renaming a variable means updating every reader, and moving
 one between files changes its precedence rank. Neither is a transform this rule
 can see, let alone make safely.
@@ -66,14 +77,23 @@ MISPLACED_TAG = "no-fake-ansible-vars[misplaced]"
 NAMING_TAG = "no-fake-ansible-vars[naming]"
 
 
+def _is_vaulted(value: Any) -> bool:
+    """True for a ruamel node tagged `!vault` (an inline-encrypted scalar)."""
+    tag = getattr(value, "tag", None)
+    return tag is not None and str(tag) == "!vault"
+
+
 def find_prefixed_vars(
     data: Any,
     role_names: frozenset[str] | set[str] = frozenset(),
-) -> list[tuple[str, int]]:
-    """Return (varname, line) for each top-level `ansible_*` key.
+) -> list[tuple[str, int, bool]]:
+    """Return (varname, line, vaulted) for each top-level `ansible_*` key.
 
     Only TOP-LEVEL keys count. A nested `ansible_user` is a field inside somebody
     else's data structure, not a variable Ansible resolves under that name.
+
+    Each tuple also says whether the value is `!vault`-encrypted, so the
+    caller can word the remedy — see VAULTED VALUES ARE NOT EXEMPT.
     """
     if not isinstance(data, dict):
         return []
@@ -86,7 +106,7 @@ def find_prefixed_vars(
         return pos[0] + 1 if pos else 0
 
     return [
-        (str(key), line_of(data, key))
+        (str(key), line_of(data, key), _is_vaulted(data[key]))
         for key in data
         if str(key).startswith("ansible_") and not owns_prefix(str(key), role_names)
     ]
@@ -128,7 +148,7 @@ class NoFakeAnsibleVarsRule(AnsibleLintRule):
             return bool({self.id, tag}.intersection(skips))
 
         matches: list[MatchError] = []
-        for name, line in find_prefixed_vars(data, role_names):
+        for name, line, vaulted in find_prefixed_vars(data, role_names):
             if name in BUILTIN_ANSIBLE_VARS:
                 tag = MISPLACED_TAG
                 message = (
@@ -138,6 +158,11 @@ class NoFakeAnsibleVarsRule(AnsibleLintRule):
                     "file is what makes a host's connection settings readable "
                     "without resolving group precedence."
                 )
+                if vaulted:
+                    message += (
+                        " The inline !vault block moves as-is: the inventory "
+                        "file is loaded by the same parser and decrypts it too."
+                    )
             else:
                 tag = NAMING_TAG
                 message = (
@@ -168,12 +193,12 @@ if "pytest" in sys.modules:  # pragma: no cover
 
     def test_flags_a_fake_builtin() -> None:
         data = _load("---\nansible_ssh_notify_email: a@b.net\n")
-        assert find_prefixed_vars(data) == [("ansible_ssh_notify_email", 2)]
+        assert find_prefixed_vars(data) == [("ansible_ssh_notify_email", 2, False)]
 
     def test_flags_a_real_builtin_too() -> None:
         # The prefix test is the point: a built-in in a vars file is misplaced.
         assert find_prefixed_vars(_load("---\nansible_user: root\n")) == [
-            ("ansible_user", 2),
+            ("ansible_user", 2, False),
         ]
 
     def test_ignores_unprefixed_names() -> None:
@@ -183,14 +208,22 @@ if "pytest" in sys.modules:  # pragma: no cover
         data = _load("---\nansible_control_node_stage: build\n")
         assert find_prefixed_vars(data, {"ansible_control_node"}) == []
         assert find_prefixed_vars(data, {"other_role"}) == [
-            ("ansible_control_node_stage", 2),
+            ("ansible_control_node_stage", 2, False),
         ]
 
     def test_role_exemption_requires_separator() -> None:
         data = _load("---\nansible_controlnode_x: 1\n")
         assert find_prefixed_vars(data, {"ansible_control"}) == [
-            ("ansible_controlnode_x", 2),
+            ("ansible_controlnode_x", 2, False),
         ]
+
+    def test_vaulted_value_is_still_flagged() -> None:
+        # Encryption does not change where a built-in belongs.
+        data = _load(
+            "---\nansible_become_password: !vault |\n"
+            "  $ANSIBLE_VAULT;1.1;AES256\n  3961\n",
+        )
+        assert find_prefixed_vars(data) == [("ansible_become_password", 2, True)]
 
     def test_ignores_nested_keys() -> None:
         assert find_prefixed_vars(_load("---\ncfg:\n  ansible_bogus: 1\n")) == []
@@ -268,6 +301,27 @@ if "pytest" in sys.modules:  # pragma: no cover
         finally:
             os.chdir(cwd)
             known_role_names.cache_clear()
+
+    def test_matchyaml_vaulted_value_gets_move_as_is_hint(tmp_path: Any) -> None:
+        matches = _lint(
+            tmp_path,
+            "inventory/group_vars/g/main.yml",
+            "---\nansible_become_password: !vault |\n"
+            "  $ANSIBLE_VAULT;1.1;AES256\n  3961\n",
+        )
+        assert [m.tag for m in matches] == [MISPLACED_TAG]
+        assert "moves as-is" in matches[0].message
+
+    def test_matchyaml_ignores_whole_file_vault(tmp_path: Any) -> None:
+        # Whole-file encryption is not a mapping, so there is nothing to scan.
+        assert (
+            _lint(
+                tmp_path,
+                "inventory/host_vars/h/vault.yml",
+                "$ANSIBLE_VAULT;1.1;AES256\n3961\n",
+            )
+            == []
+        )
 
     def test_matchyaml_skips_inventory_files(tmp_path: Any) -> None:
         # hosts.yml is out of scope: ansible_ names are correct there.
