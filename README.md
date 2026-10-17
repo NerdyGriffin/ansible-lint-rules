@@ -10,8 +10,8 @@ copy.
 | --- | --- | --- |
 | `become-first` | yes | `become` and its `become_*` companions must sort directly after `name` in a task. |
 | `no-host-os-vars` | no | A host entry in an inventory file must not declare `os_family`, `os_distribution`, `os_version` or `os_edition`. |
-| `no-fake-ansible-vars` | no | A vars file must not define `ansible_`-prefixed variables. |
-| `inventory-var-placement` | no | Built-in connection vars belong in the inventory file; everything else belongs in `group_vars`/`host_vars`. |
+| `reserved-prefix` | no | A vars file must not define `ansible_`-prefixed variables; the prefix is reserved to Ansible. |
+| `builtin-var-placement` | no | Built-in connection vars belong in the inventory file (`hosts.yml`); everything else belongs in `group_vars`/`host_vars`. |
 
 These are opinionated conventions, not bug detectors. Adopt the ones you want;
 `skip_list` disables the rest, or `warn_list` keeps them running but makes their
@@ -58,7 +58,7 @@ Scope is deliberately narrow: only keys set directly on a host entry under a
 facts (a switch, a UPS card), record the OS in a comment, or use
 `# noqa: no-host-os-vars` if it must be a var.
 
-### `no-fake-ansible-vars`
+### `reserved-prefix`
 
 In a vars file — `group_vars/`, `host_vars/`, a role's `defaults/` or `vars/` —
 a name starting with `ansible_` is wrong whichever kind it turns out to be, so
@@ -66,8 +66,8 @@ this rule matches on the **prefix**:
 
 ```yaml
 # group_vars/control_nodes/main.yml
-ansible_user: root                        # [misplaced] — a built-in; belongs in the inventory file
-ansible_ssh_notify_email: ops@example.net # [naming]    — not a built-in; rename it
+ansible_user: root                        # [builtin]   — a built-in; belongs in the inventory file
+ansible_ssh_notify_email: ops@example.net # [lookalike] — not a built-in; rename it
 notify_email: ops@example.net             # fine
 ```
 
@@ -75,7 +75,7 @@ The built-in list is still consulted, but only to decide *which* of the two
 problems it is, so the message names the right fix — move it, or rename it.
 
 Inventory files are out of scope: `ansible_` names are correct in `hosts.yml`,
-and the opposite question there belongs to `inventory-var-placement`.
+and the opposite question there belongs to `builtin-var-placement`.
 
 An inline-encrypted value is **not** exempt. `ansible_become_password: !vault |`
 in `group_vars` is still a built-in in the wrong file — encryption changes what
@@ -89,20 +89,20 @@ A role may prefix its own variables with its own name, so a role called
 the Galaxy flat-role-prefix convention. Which names count is read from Ansible's
 live `roles_path` (see below), not guessed from the file's path.
 
-### `inventory-var-placement`
+### `builtin-var-placement`
 
 Two directions, decided by the built-in list:
 
 ```yaml
 # group_vars/proxmox/main.yml
-become: false            # flagged — a built-in (no prefix!), belongs in the inventory file
+become: false            # [builtin-in-vars-file] — a built-in (no prefix!), belongs in the inventory file
 
 # inventory/hosts.yml
 all:
   hosts:
     web-1:
       ansible_host: 10.0.0.1     # correct
-      app_release_channel: beta  # flagged — not a built-in, belongs in host_vars/
+      app_release_channel: beta  # [custom-in-hosts-file] — not a built-in, belongs in host_vars/
 ```
 
 The point is that a host's connection settings should be readable in one file
@@ -114,7 +114,7 @@ Group *names* are never treated as variables, structured values (a `vm_spec:`
 mapping, say) are left alone, and role `vars/` directories are out of scope even
 though they share ansible-lint's `vars` file kind.
 
-**No line draws findings from two of these rules.** `no-fake-ansible-vars` owns
+**No line draws findings from two of these rules.** `reserved-prefix` owns
 `ansible_`-prefixed names in vars files, so this rule reports only *unprefixed*
 built-ins there. `no-host-os-vars` owns the `os_*` keys, so this rule skips them
 — not merely to avoid a duplicate, but because "move it to `group_vars`" is the
@@ -122,7 +122,7 @@ wrong fix for a var whose real remedy is deletion.
 
 ## How the built-in list is derived
 
-`no-fake-ansible-vars` and `inventory-var-placement` both ask "is this one of
+`reserved-prefix` and `builtin-var-placement` both ask "is this one of
 Ansible's own variables?", so the answer lives once in `ansible_builtin_vars.py`.
 It is deliberately **not** an `ansible_` prefix test, which is wrong in both
 directions: it flags homelab names that merely look built-in, and it misses real

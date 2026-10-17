@@ -41,5 +41,5 @@ jobs:
           ansible-lint -R -r . -L --nocolor | tee /tmp/rules.txt
           grep -q 'become-first' /tmp/rules.txt
           grep -q 'no-host-os-vars' /tmp/rules.txt
-          grep -q 'no-fake-ansible-vars' /tmp/rules.txt
-          grep -q 'inventory-var-placement' /tmp/rules.txt
+          grep -q 'reserved-prefix' /tmp/rules.txt
+          grep -q 'builtin-var-placement' /tmp/rules.txt

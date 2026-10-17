@@ -1,6 +1,6 @@
 """Ansible's built-in (behavioral / connection) variable names.
 
-Shared by `no-fake-ansible-vars` and `inventory-var-placement`. Both rules turn
+Shared by `reserved-prefix` and `builtin-var-placement`. Both rules turn
 on the same question — "is this name one Ansible itself defines?" — so the list
 lives here once rather than in each rule.
 
@@ -10,7 +10,7 @@ A prefix test is wrong in both directions:
 
 * It flags names Ansible never reserved. `ansible_ssh_notify_email` was a
   homelab notification address that merely looked built-in — the very confusion
-  `no-fake-ansible-vars` exists to stop.
+  `reserved-prefix` exists to stop.
 * It misses real ones that carry no prefix. `become`, `become_user`,
   `proxmox_api_host`, `wsl_user` and friends below are genuine connection-plugin
   vars, and a prefix test waves every one of them through.
@@ -32,7 +32,7 @@ The union of four sources, none of which is sufficient alone:
    is read by the inventory manager while it is *building* groups, so it works
    only from the inventory source and nowhere else — and for the same reason it
    is neither a magic-variable mapping nor a plugin option, so the three
-   automatic sources cannot see it. Without this set `inventory-var-placement`
+   automatic sources cannot see it. Without this set `builtin-var-placement`
    would tell you to move it to `group_vars/`, where it does nothing.
 
 REGENERATING
@@ -453,7 +453,7 @@ BUILTIN_VARS: frozenset[str] = frozenset(
 # parsing rather than looked up as variables afterwards.
 INVENTORY_ONLY_VARS: frozenset[str] = frozenset({"ansible_group_priority"})
 
-# The prefixed subset. `no-fake-ansible-vars` compares against this one: a name
+# The prefixed subset. `reserved-prefix` compares against this one: a name
 # without the prefix cannot be mistaken for a built-in, so it is that rule's
 # business only when it IS one.
 BUILTIN_ANSIBLE_VARS: frozenset[str] = frozenset(

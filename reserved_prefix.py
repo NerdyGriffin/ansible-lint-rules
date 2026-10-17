@@ -1,30 +1,31 @@
-"""Custom ansible-lint rule: no `ansible_`-prefixed variables in a vars file.
+"""Custom ansible-lint rule: the `ansible_` prefix is reserved to Ansible.
 
 Convention: the `ansible_` prefix belongs to Ansible, and a vars file is not
 where Ansible's own variables live. So in `group_vars/`, `host_vars/`, a role's
 `defaults/` and `vars/`, or a standalone vars file, a name starting with
 `ansible_` is wrong whichever kind it turns out to be:
 
-* If it IS one of Ansible's built-ins, it is misplaced — connection settings
-  belong in the inventory file so a host's reachability is readable in one place.
-* If it is NOT, the name is misleading — it reads as connection configuration to
-  everyone who meets it. The case this was written for is
-  `ansible_ssh_notify_email`, a notification address, sitting directly beside the
-  genuinely reserved `ansible_ssh_common_args`.
+* `[builtin]` — it IS one of Ansible's built-ins, so it is misplaced: connection
+  settings belong in the inventory file so a host's reachability is readable in
+  one place.
+* `[lookalike]` — it is NOT a built-in, so the name is misleading: it reads as
+  connection configuration to everyone who meets it. The case this was written
+  for is `ansible_ssh_notify_email`, a notification address, sitting directly
+  beside the genuinely reserved `ansible_ssh_common_args`.
 
 DELIBERATELY A PREFIX TEST
 --------------------------
-Unlike `inventory-var-placement`, this rule matches on the prefix rather than on
+Unlike `builtin-var-placement`, this rule matches on the prefix rather than on
 membership of the built-in list, because in a vars file BOTH answers are
-findings. That makes it a cheap, obvious rule with an obvious remedy: no
-`ansible_` names here.
+findings. That is what the name says: the prefix is reserved, so a vars file
+may not use it at all. The rule is cheap and obvious, with an obvious remedy.
 
 The built-in list is still consulted, but only to say WHICH of the two problems
 this is, so the message names the right fix — move it, or rename it.
 
 `hosts.yml` and other inventory files are out of scope: `ansible_` names are
 correct there, and the reverse question (a NON-built-in in the inventory file) is
-`inventory-var-placement`'s to answer. The two rules therefore never both fire on
+`builtin-var-placement`'s to answer. The two rules therefore never both fire on
 the same line.
 
 OWNER-PREFIX EXEMPTION
@@ -73,8 +74,8 @@ except ImportError:  # pragma: no cover
 if TYPE_CHECKING:
     from ansiblelint.file_utils import Lintable
 
-MISPLACED_TAG = "no-fake-ansible-vars[misplaced]"
-NAMING_TAG = "no-fake-ansible-vars[naming]"
+BUILTIN_TAG = "reserved-prefix[builtin]"
+LOOKALIKE_TAG = "reserved-prefix[lookalike]"
 
 
 def _is_vaulted(value: Any) -> bool:
@@ -112,16 +113,16 @@ def find_prefixed_vars(
     ]
 
 
-class NoFakeAnsibleVarsRule(AnsibleLintRule):
+class ReservedPrefixRule(AnsibleLintRule):
     """Vars files must not define ansible_-prefixed variables."""
 
-    id = "no-fake-ansible-vars"
+    id = "reserved-prefix"
     severity = "MEDIUM"
     tags = ["idiom"]
-    version_changed = "1.1.0"
+    version_changed = "1.2.0"
     _ids = {
-        MISPLACED_TAG: "built-in var belongs in the inventory file",
-        NAMING_TAG: "ansible_-prefixed name is not an Ansible built-in",
+        BUILTIN_TAG: "built-in var belongs in the inventory file",
+        LOOKALIKE_TAG: "ansible_-prefixed name is not an Ansible built-in",
     }
 
     def matchyaml(self, file: Lintable) -> list[MatchError]:
@@ -150,7 +151,7 @@ class NoFakeAnsibleVarsRule(AnsibleLintRule):
         matches: list[MatchError] = []
         for name, line, vaulted in find_prefixed_vars(data, role_names):
             if name in BUILTIN_ANSIBLE_VARS:
-                tag = MISPLACED_TAG
+                tag = BUILTIN_TAG
                 message = (
                     f"'{name}' is one of Ansible's built-in connection variables, "
                     "so it belongs on the host entry or a group's vars: block in "
@@ -164,7 +165,7 @@ class NoFakeAnsibleVarsRule(AnsibleLintRule):
                         "file is loaded by the same parser and decrypts it too."
                     )
             else:
-                tag = NAMING_TAG
+                tag = LOOKALIKE_TAG
                 message = (
                     f"'{name}' uses the ansible_ prefix but is not one of "
                     "Ansible's built-in variables, so it reads as connection "
@@ -240,26 +241,26 @@ if "pytest" in sys.modules:  # pragma: no cover
         path = tmp_path / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
-        return NoFakeAnsibleVarsRule().matchyaml(Lintable(str(path)))
+        return ReservedPrefixRule().matchyaml(Lintable(str(path)))
 
-    def test_matchyaml_tags_a_builtin_as_misplaced(tmp_path: Any) -> None:
+    def test_matchyaml_tags_a_builtin_as_builtin(tmp_path: Any) -> None:
         matches = _lint(
             tmp_path,
             "inventory/group_vars/proxmox/main.yml",
             "---\nansible_user: root\n",
         )
         assert len(matches) == 1
-        assert matches[0].tag == MISPLACED_TAG
+        assert matches[0].tag == BUILTIN_TAG
         assert "inventory file" in matches[0].message
 
-    def test_matchyaml_tags_a_non_builtin_as_naming(tmp_path: Any) -> None:
+    def test_matchyaml_tags_a_non_builtin_as_lookalike(tmp_path: Any) -> None:
         matches = _lint(
             tmp_path,
             "inventory/group_vars/ctl/main.yml",
             "---\nansible_ssh_notify_email: a@b.net\n",
         )
         assert len(matches) == 1
-        assert matches[0].tag == NAMING_TAG
+        assert matches[0].tag == LOOKALIKE_TAG
         assert "Rename it" in matches[0].message
 
     def test_matchyaml_honors_noqa(tmp_path: Any) -> None:
@@ -267,7 +268,7 @@ if "pytest" in sys.modules:  # pragma: no cover
             _lint(
                 tmp_path,
                 "inventory/group_vars/ctl/main.yml",
-                "---\nansible_legacy: 1 # noqa: no-fake-ansible-vars\n",
+                "---\nansible_legacy: 1 # noqa: reserved-prefix\n",
             )
             == []
         )
@@ -275,7 +276,7 @@ if "pytest" in sys.modules:  # pragma: no cover
     def test_matchyaml_exempts_a_role_in_project_root_roles(tmp_path: Any) -> None:
         """Regression: default roles_path excludes <root>/roles.
 
-        A role's own correctly-prefixed variable was reported as a fake built-in
+        A role's own correctly-prefixed variable was reported as a reserved-prefix lookalike
         in any repo that had not appended ./roles to roles_path in ansible.cfg.
         """
         import os
@@ -309,7 +310,7 @@ if "pytest" in sys.modules:  # pragma: no cover
             "---\nansible_become_password: !vault |\n"
             "  $ANSIBLE_VAULT;1.1;AES256\n  3961\n",
         )
-        assert [m.tag for m in matches] == [MISPLACED_TAG]
+        assert [m.tag for m in matches] == [BUILTIN_TAG]
         assert "moves as-is" in matches[0].message
 
     def test_matchyaml_ignores_whole_file_vault(tmp_path: Any) -> None:
@@ -332,4 +333,4 @@ if "pytest" in sys.modules:  # pragma: no cover
         path.write_text("all:\n  hosts:\n    h:\n      ansible_host: 10.0.0.1\n")
         lintable = Lintable(str(path))
         assert str(lintable.kind) != "vars"
-        assert NoFakeAnsibleVarsRule().matchyaml(lintable) == []
+        assert ReservedPrefixRule().matchyaml(lintable) == []

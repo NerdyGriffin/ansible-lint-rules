@@ -1,4 +1,4 @@
-"""Custom ansible-lint rule: built-in vars in the inventory file, others out.
+"""Custom ansible-lint rule: built-in vars go in the hosts file, others go out.
 
 Convention: how a host is reached should be answerable by reading ONE file.
 Ansible's built-in behavioral/connection vars (`ansible_user`,
@@ -18,9 +18,9 @@ TWO DIRECTIONS, ONE LIST
 ------------------------
 Both subtags are decided by membership in `BUILTIN_VARS`:
 
-* `[builtin-outside-inventory]` — a built-in defined in `group_vars/` or
-  `host_vars/`. Move it to the inventory file.
-* `[non-builtin-in-inventory]` — a non-built-in defined on a host entry or a
+* `[builtin-in-vars-file]` — a built-in defined in `group_vars/` or
+  `host_vars/`. Move it to the inventory file (`hosts.yml`).
+* `[custom-in-hosts-file]` — a non-built-in defined on a host entry or a
   group `vars:` block in the inventory file. Move it to `group_vars`/`host_vars`,
   which keeps the inventory file about reachability.
 
@@ -29,7 +29,7 @@ once the first direction pushes traffic toward it.
 
 DIVISION OF LABOUR WITH THE OTHER RULES
 ---------------------------------------
-`no-fake-ansible-vars` owns every `ansible_`-prefixed name in a vars file, so the
+`reserved-prefix` owns every `ansible_`-prefixed name in a vars file, so the
 first direction here skips them and reports only built-ins with NO prefix —
 `become`, `proxmox_api_host`, `wsl_user` and friends, which a prefix rule cannot
 see.
@@ -73,8 +73,8 @@ except ImportError:  # pragma: no cover
 if TYPE_CHECKING:
     from ansiblelint.file_utils import Lintable
 
-OUTSIDE_TAG = "inventory-var-placement[builtin-outside-inventory]"
-INSIDE_TAG = "inventory-var-placement[non-builtin-in-inventory]"
+VARS_FILE_TAG = "builtin-var-placement[builtin-in-vars-file]"
+HOSTS_FILE_TAG = "builtin-var-placement[custom-in-hosts-file]"
 
 # Reserved group-node keys. These structure the inventory; they are not vars.
 GROUP_KEYS: frozenset[str] = frozenset({"hosts", "children", "vars"})
@@ -146,7 +146,7 @@ def find_builtins_in_vars_file(data: Any) -> list[tuple[str, int]]:
     Top-level keys only — a nested `ansible_user` is a field inside somebody
     else's structure, not a variable Ansible resolves under that name.
 
-    `ansible_`-prefixed names are deliberately skipped: `no-fake-ansible-vars`
+    `ansible_`-prefixed names are deliberately skipped: `reserved-prefix`
     already reports every one of them in a vars file, so reporting them here too
     would put two findings on one line. What is left to catch is the built-in
     that carries NO prefix — `become`, `proxmox_api_host`, `wsl_user` — which a
@@ -174,16 +174,16 @@ def inventory_vars_dir(path: Path) -> str | None:
     return None
 
 
-class InventoryVarPlacementRule(AnsibleLintRule):
+class BuiltinVarPlacementRule(AnsibleLintRule):
     """Built-in vars belong in the inventory file; other vars do not."""
 
-    id = "inventory-var-placement"
+    id = "builtin-var-placement"
     severity = "MEDIUM"
     tags = ["idiom"]
-    version_changed = "1.1.0"
+    version_changed = "1.2.0"
     _ids = {
-        OUTSIDE_TAG: "built-in var defined outside the inventory file",
-        INSIDE_TAG: "non-built-in var defined in the inventory file",
+        VARS_FILE_TAG: "built-in var defined outside the inventory file",
+        HOSTS_FILE_TAG: "non-built-in var defined in the inventory file",
     }
 
     def matchyaml(self, file: Lintable) -> list[MatchError]:
@@ -222,10 +222,10 @@ class InventoryVarPlacementRule(AnsibleLintRule):
                     "resolving group precedence.",
                     filename=file,
                     lineno=line,
-                    tag=OUTSIDE_TAG,
+                    tag=VARS_FILE_TAG,
                 )
                 for name, line in find_builtins_in_vars_file(data)
-                if not skipped(line, OUTSIDE_TAG)
+                if not skipped(line, VARS_FILE_TAG)
             ]
 
         return [
@@ -235,10 +235,10 @@ class InventoryVarPlacementRule(AnsibleLintRule):
                 "the inventory file stays about how hosts are reached.",
                 filename=file,
                 lineno=line,
-                tag=INSIDE_TAG,
+                tag=HOSTS_FILE_TAG,
             )
             for where, name, line in find_non_builtins_in_inventory(data)
-            if not skipped(line, INSIDE_TAG)
+            if not skipped(line, HOSTS_FILE_TAG)
         ]
 
 
@@ -251,7 +251,7 @@ if "pytest" in sys.modules:  # pragma: no cover
     # --- direction 1: built-ins in a vars file -----------------------------
 
     def test_defers_prefixed_builtin_to_the_other_rule() -> None:
-        # no-fake-ansible-vars owns ansible_* in a vars file; no double-report.
+        # reserved-prefix owns ansible_* in a vars file; no double-report.
         data = _load("---\nansible_user: root\nmy_setting: 1\n")
         assert find_builtins_in_vars_file(data) == []
 
@@ -347,7 +347,7 @@ if "pytest" in sys.modules:  # pragma: no cover
         path.write_text(text)
         return [
             m.message
-            for m in InventoryVarPlacementRule().matchyaml(Lintable(str(path)))
+            for m in BuiltinVarPlacementRule().matchyaml(Lintable(str(path)))
         ]
 
     def test_matchyaml_group_vars_unprefixed_builtin(tmp_path: Any) -> None:
@@ -379,7 +379,7 @@ if "pytest" in sys.modules:  # pragma: no cover
             _lint(
                 tmp_path,
                 "inventory/group_vars/proxmox/main.yml",
-                "---\nbecome: true # noqa: inventory-var-placement\n",
+                "---\nbecome: true # noqa: builtin-var-placement\n",
             )
             == []
         )
